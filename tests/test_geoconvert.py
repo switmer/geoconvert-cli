@@ -4,7 +4,6 @@ Tests for geoconvert.
 Run with: pytest tests/ -v
 """
 
-import json
 import tempfile
 import zipfile
 from pathlib import Path
@@ -15,13 +14,10 @@ from geoconvert import (
     convert,
     probe,
     read_geojson,
-    read_shapefile,
     write_geojson,
-    write_kml,
     convert_batch,
     collect_input_files,
     geometry_to_wkt,
-    WGS84,
     normalize_crs,
     transform_geometry,
 )

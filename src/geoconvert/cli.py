@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .core import convert, probe, print_probe_report, convert_batch, collect_input_files, BatchResult
+from .core import convert, probe, print_probe_report, convert_batch, collect_input_files
 from .readers import READERS
 from .writers import WRITERS
 

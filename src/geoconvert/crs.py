@@ -3,7 +3,7 @@ Coordinate Reference System (CRS) handling and reprojection.
 """
 
 from pathlib import Path
-from typing import Optional, Union, List, Any
+from typing import Optional, Union, List
 
 from pyproj import CRS, Transformer
 

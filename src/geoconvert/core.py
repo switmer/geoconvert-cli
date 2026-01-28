@@ -6,7 +6,7 @@ import fnmatch
 import json
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional, Union, List, Dict, Any
+from typing import Optional, Union, List
 
 from .readers import READERS
 from .writers import WRITERS
@@ -217,7 +217,7 @@ class BatchResult:
 
     def print_summary(self):
         """Print summary to stdout."""
-        print(f"\nBatch conversion complete:")
+        print("\nBatch conversion complete:")
         print(f"  Total:     {self.total}")
         print(f"  Succeeded: {self.succeeded}")
         print(f"  Failed:    {self.failed}")
