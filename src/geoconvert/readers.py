@@ -3,26 +3,36 @@ Readers - Convert various geospatial formats to GeoJSON.
 """
 
 import csv
+import io
 import json
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, TextIO
+
+# Text formats that support streaming
+TEXT_FORMATS = {'.geojson', '.json', '.kml', '.gpx', '.csv', '.wkt', '.topojson'}
+BINARY_FORMATS = {'.shp', '.kmz'}  # File-only formats
 
 
-def read_geojson(path: Union[str, Path]) -> dict:
+def read_geojson(path_or_stream: Union[str, Path, TextIO]) -> dict:
     """
-    Read a GeoJSON file.
+    Read a GeoJSON file or stream.
 
     Args:
-        path: Path to .geojson or .json file
+        path_or_stream: Path to .geojson/.json file, or file-like object
 
     Returns:
         GeoJSON FeatureCollection dict
     """
-    with open(path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+    if hasattr(path_or_stream, 'read'):
+        # It's a file-like object (stream)
+        data = json.load(path_or_stream)
+    else:
+        with open(path_or_stream, 'r', encoding='utf-8') as f:
+            data = json.load(f)
 
     # Normalize to FeatureCollection
     if data.get("type") == "FeatureCollection":
@@ -72,17 +82,20 @@ def read_shapefile(path: Union[str, Path], detect_crs: bool = True) -> dict:
     return geojson
 
 
-def read_kml(path: Union[str, Path]) -> dict:
+def read_kml(path_or_stream: Union[str, Path, TextIO]) -> dict:
     """
-    Read a KML file and convert to GeoJSON.
+    Read a KML file or stream and convert to GeoJSON.
 
     Args:
-        path: Path to .kml file
+        path_or_stream: Path to .kml file, or file-like object
 
     Returns:
         GeoJSON FeatureCollection dict
     """
-    tree = ET.parse(path)
+    if hasattr(path_or_stream, 'read'):
+        tree = ET.parse(path_or_stream)
+    else:
+        tree = ET.parse(path_or_stream)
     root = tree.getroot()
 
     # Handle KML namespace
@@ -236,17 +249,20 @@ def read_kmz(path: Union[str, Path]) -> dict:
             return read_kml(kml_path)
 
 
-def read_gpx(path: Union[str, Path]) -> dict:
+def read_gpx(path_or_stream: Union[str, Path, TextIO]) -> dict:
     """
-    Read a GPX file and convert to GeoJSON.
+    Read a GPX file or stream and convert to GeoJSON.
 
     Args:
-        path: Path to .gpx file
+        path_or_stream: Path to .gpx file, or file-like object
 
     Returns:
         GeoJSON FeatureCollection dict
     """
-    tree = ET.parse(path)
+    if hasattr(path_or_stream, 'read'):
+        tree = ET.parse(path_or_stream)
+    else:
+        tree = ET.parse(path_or_stream)
     root = tree.getroot()
 
     # Handle GPX namespace
@@ -348,12 +364,12 @@ def read_gpx(path: Union[str, Path]) -> dict:
     return geojson
 
 
-def read_csv(path: Union[str, Path], lat_col: str = 'lat', lon_col: str = 'lon') -> dict:
+def read_csv(path_or_stream: Union[str, Path, TextIO], lat_col: str = 'lat', lon_col: str = 'lon') -> dict:
     """
-    Read a CSV file with coordinate columns and convert to GeoJSON points.
+    Read a CSV file or stream with coordinate columns and convert to GeoJSON points.
 
     Args:
-        path: Path to .csv file
+        path_or_stream: Path to .csv file, or file-like object
         lat_col: Name of latitude column (case-insensitive)
         lon_col: Name of longitude column (case-insensitive)
 
@@ -362,59 +378,71 @@ def read_csv(path: Union[str, Path], lat_col: str = 'lat', lon_col: str = 'lon')
     """
     geojson = {"type": "FeatureCollection", "features": []}
 
-    with open(path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-
-        # Find lat/lon columns (case-insensitive)
-        fieldnames_lower = {name.lower(): name for name in reader.fieldnames or []}
-        lat_key = fieldnames_lower.get(lat_col.lower())
-        lon_key = fieldnames_lower.get(lon_col.lower())
-
-        # Try common alternatives
-        if not lat_key:
-            for alt in ['latitude', 'lat', 'y']:
-                if alt in fieldnames_lower:
-                    lat_key = fieldnames_lower[alt]
-                    break
-        if not lon_key:
-            for alt in ['longitude', 'lon', 'lng', 'long', 'x']:
-                if alt in fieldnames_lower:
-                    lon_key = fieldnames_lower[alt]
-                    break
-
-        if not lat_key or not lon_key:
-            raise ValueError(f"Could not find lat/lon columns. Available: {reader.fieldnames}")
-
-        for row in reader:
-            try:
-                lat = float(row[lat_key])
-                lon = float(row[lon_key])
-            except (ValueError, TypeError):
-                continue
-
-            properties = {k: v for k, v in row.items() if k not in [lat_key, lon_key]}
-
-            geojson["features"].append({
-                "type": "Feature",
-                "properties": properties,
-                "geometry": {"type": "Point", "coordinates": [lon, lat]}
-            })
+    if hasattr(path_or_stream, 'read'):
+        # It's a file-like object (stream)
+        reader = csv.DictReader(path_or_stream)
+        _process_csv_reader(reader, geojson, lat_col, lon_col)
+    else:
+        with open(path_or_stream, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            _process_csv_reader(reader, geojson, lat_col, lon_col)
 
     return geojson
 
 
-def read_topojson(path: Union[str, Path]) -> dict:
+def _process_csv_reader(reader, geojson: dict, lat_col: str, lon_col: str):
+    """Process CSV reader and populate geojson dict."""
+    # Find lat/lon columns (case-insensitive)
+    fieldnames_lower = {name.lower(): name for name in reader.fieldnames or []}
+    lat_key = fieldnames_lower.get(lat_col.lower())
+    lon_key = fieldnames_lower.get(lon_col.lower())
+
+    # Try common alternatives
+    if not lat_key:
+        for alt in ['latitude', 'lat', 'y']:
+            if alt in fieldnames_lower:
+                lat_key = fieldnames_lower[alt]
+                break
+    if not lon_key:
+        for alt in ['longitude', 'lon', 'lng', 'long', 'x']:
+            if alt in fieldnames_lower:
+                lon_key = fieldnames_lower[alt]
+                break
+
+    if not lat_key or not lon_key:
+        raise ValueError(f"Could not find lat/lon columns. Available: {reader.fieldnames}")
+
+    for row in reader:
+        try:
+            lat = float(row[lat_key])
+            lon = float(row[lon_key])
+        except (ValueError, TypeError):
+            continue
+
+        properties = {k: v for k, v in row.items() if k not in [lat_key, lon_key]}
+
+        geojson["features"].append({
+            "type": "Feature",
+            "properties": properties,
+            "geometry": {"type": "Point", "coordinates": [lon, lat]}
+        })
+
+
+def read_topojson(path_or_stream: Union[str, Path, TextIO]) -> dict:
     """
-    Read a TopoJSON file and convert to GeoJSON.
+    Read a TopoJSON file or stream and convert to GeoJSON.
 
     Args:
-        path: Path to .topojson file
+        path_or_stream: Path to .topojson file, or file-like object
 
     Returns:
         GeoJSON FeatureCollection dict
     """
-    with open(path, 'r', encoding='utf-8') as f:
-        topo = json.load(f)
+    if hasattr(path_or_stream, 'read'):
+        topo = json.load(path_or_stream)
+    else:
+        with open(path_or_stream, 'r', encoding='utf-8') as f:
+            topo = json.load(f)
 
     geojson = {"type": "FeatureCollection", "features": []}
 

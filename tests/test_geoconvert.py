@@ -20,6 +20,10 @@ from geoconvert import (
     geometry_to_wkt,
     normalize_crs,
     transform_geometry,
+    ConvertResult,
+    EXIT_SUCCESS,
+    EXIT_ERROR,
+    EXIT_PARTIAL,
 )
 from geoconvert.crs import create_transformer
 
@@ -210,31 +214,31 @@ class TestRoundTrip:
         """GeoJSON -> KML -> GeoJSON preserves features."""
         # Write original
         geojson_path = temp_dir / "original.geojson"
-        write_geojson(sample_polygon_geojson, geojson_path)
+        write_geojson(sample_polygon_geojson, geojson_path, quiet=True)
 
         # Convert to KML
         kml_path = temp_dir / "converted.kml"
-        success = convert(geojson_path, kml_path, assume_wgs84=True)
-        assert success
+        result = convert(geojson_path, kml_path, assume_wgs84=True, quiet=True)
+        assert result.status == "success"
         assert kml_path.exists()
 
         # Convert back
         geojson2_path = temp_dir / "roundtrip.geojson"
-        success = convert(kml_path, geojson2_path)
-        assert success
+        result = convert(kml_path, geojson2_path, quiet=True)
+        assert result.status == "success"
 
         # Compare
-        result = read_geojson(geojson2_path)
-        assert len(result["features"]) == len(sample_polygon_geojson["features"])
+        geojson_result = read_geojson(geojson2_path)
+        assert len(geojson_result["features"]) == len(sample_polygon_geojson["features"])
 
     def test_geojson_to_csv(self, sample_point_geojson, temp_dir):
         """GeoJSON points to CSV preserves coordinates."""
         geojson_path = temp_dir / "points.geojson"
-        write_geojson(sample_point_geojson, geojson_path)
+        write_geojson(sample_point_geojson, geojson_path, quiet=True)
 
         csv_path = temp_dir / "points.csv"
-        success = convert(geojson_path, csv_path, assume_wgs84=True)
-        assert success
+        result = convert(geojson_path, csv_path, assume_wgs84=True, quiet=True)
+        assert result.status == "success"
         assert csv_path.exists()
 
         # Check CSV content
@@ -253,7 +257,7 @@ class TestProbe:
 
     def test_probe_geojson(self, sample_polygon_geojson, temp_dir):
         geojson_path = temp_dir / "test.geojson"
-        write_geojson(sample_polygon_geojson, geojson_path)
+        write_geojson(sample_polygon_geojson, geojson_path, quiet=True)
 
         result = probe(geojson_path)
 
@@ -276,8 +280,8 @@ class TestBatch:
         input_dir.mkdir()
 
         # Create input files
-        write_geojson(sample_point_geojson, input_dir / "points.geojson")
-        write_geojson(sample_polygon_geojson, input_dir / "polygons.geojson")
+        write_geojson(sample_point_geojson, input_dir / "points.geojson", quiet=True)
+        write_geojson(sample_polygon_geojson, input_dir / "polygons.geojson", quiet=True)
 
         # Collect and convert
         files = collect_input_files(input_dir, include_ext=[".geojson"])
@@ -303,7 +307,7 @@ class TestBatch:
         output_dir.mkdir()
 
         # Create input and pre-existing output
-        write_geojson(sample_point_geojson, input_dir / "points.geojson")
+        write_geojson(sample_point_geojson, input_dir / "points.geojson", quiet=True)
         (output_dir / "points.kml").write_text("<kml>existing</kml>")
 
         files = collect_input_files(input_dir, include_ext=[".geojson"])
@@ -327,7 +331,7 @@ class TestBatch:
         input_dir.mkdir()
         output_dir.mkdir()
 
-        write_geojson(sample_point_geojson, input_dir / "points.geojson")
+        write_geojson(sample_point_geojson, input_dir / "points.geojson", quiet=True)
         (output_dir / "points.kml").write_text("<kml>existing</kml>")
 
         files = collect_input_files(input_dir, include_ext=[".geojson"])
@@ -356,7 +360,7 @@ class TestEdgeCases:
         """Handle empty FeatureCollection."""
         geojson = {"type": "FeatureCollection", "features": []}
         geojson_path = temp_dir / "empty.geojson"
-        write_geojson(geojson, geojson_path)
+        write_geojson(geojson, geojson_path, quiet=True)
 
         result = probe(geojson_path)
         assert result["feature_count"] == 0
@@ -366,23 +370,23 @@ class TestEdgeCases:
         fake_file = temp_dir / "test.xyz"
         fake_file.write_text("fake content")
 
-        success = convert(fake_file, temp_dir / "output.geojson")
-        assert not success
+        result = convert(fake_file, temp_dir / "output.geojson", quiet=True)
+        assert result.status == "error"
 
     def test_missing_crs_for_kml(self, sample_polygon_geojson, temp_dir):
         """Fail gracefully when CRS missing for KML output."""
         geojson_path = temp_dir / "test.geojson"
-        write_geojson(sample_polygon_geojson, geojson_path)
+        write_geojson(sample_polygon_geojson, geojson_path, quiet=True)
 
         kml_path = temp_dir / "test.kml"
 
         # Should fail without --assume-wgs84 (no CRS detected from GeoJSON)
         # Note: This might pass if GeoJSON reader defaults to WGS84
         # The test documents expected behavior
-        success = convert(geojson_path, kml_path)
+        result = convert(geojson_path, kml_path, quiet=True)
         # Either succeeds (assumes WGS84) or fails (requires explicit flag)
         # Both are valid behaviors - document what yours does
-        assert isinstance(success, bool)
+        assert isinstance(result, ConvertResult)
 
     def test_kmz_reading(self, sample_point_geojson, temp_dir):
         """KMZ files are auto-extracted and read."""
@@ -391,7 +395,7 @@ class TestEdgeCases:
 
         # Create a KML file
         kml_path = temp_dir / "doc.kml"
-        write_kml(sample_point_geojson, kml_path, name_field="name")
+        write_kml(sample_point_geojson, kml_path, name_field="name", quiet=True)
 
         # Zip it into a KMZ
         kmz_path = temp_dir / "test.kmz"
@@ -403,3 +407,58 @@ class TestEdgeCases:
 
         assert result["type"] == "FeatureCollection"
         assert len(result["features"]) == 1
+
+
+# ============================================================================
+# NEW TESTS: ConvertResult and Exit Codes
+# ============================================================================
+
+class TestConvertResult:
+    """Test new ConvertResult type."""
+
+    def test_convert_result_success(self, sample_point_geojson, temp_dir):
+        """Successful conversion returns proper ConvertResult."""
+        geojson_path = temp_dir / "test.geojson"
+        write_geojson(sample_point_geojson, geojson_path, quiet=True)
+
+        kml_path = temp_dir / "test.kml"
+        result = convert(geojson_path, kml_path, assume_wgs84=True, quiet=True)
+
+        assert isinstance(result, ConvertResult)
+        assert result.status == "success"
+        assert result.feature_count == 1
+        assert result.input_path is not None
+        assert result.output_path is not None
+
+    def test_convert_result_error(self, temp_dir):
+        """Failed conversion returns error in ConvertResult."""
+        fake_file = temp_dir / "nonexistent.xyz"
+
+        result = convert(fake_file, temp_dir / "output.geojson", quiet=True)
+
+        assert isinstance(result, ConvertResult)
+        assert result.status == "error"
+        assert result.error is not None
+
+    def test_convert_result_to_dict(self, sample_point_geojson, temp_dir):
+        """ConvertResult can be converted to dict for JSON serialization."""
+        geojson_path = temp_dir / "test.geojson"
+        write_geojson(sample_point_geojson, geojson_path, quiet=True)
+
+        kml_path = temp_dir / "test.kml"
+        result = convert(geojson_path, kml_path, assume_wgs84=True, quiet=True)
+
+        result_dict = result.to_dict()
+        assert isinstance(result_dict, dict)
+        assert result_dict["status"] == "success"
+        assert "feature_count" in result_dict
+
+
+class TestExitCodes:
+    """Test exit code constants."""
+
+    def test_exit_codes_defined(self):
+        """Exit codes are properly defined."""
+        assert EXIT_SUCCESS == 0
+        assert EXIT_ERROR == 1
+        assert EXIT_PARTIAL == 2

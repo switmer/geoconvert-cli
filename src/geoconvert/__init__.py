@@ -11,7 +11,9 @@ Example usage:
     from geoconvert import convert, read_shapefile, write_kml
 
     # Simple conversion
-    convert("input.shp", "output.geojson")
+    result = convert("input.shp", "output.geojson")
+    if result.status == "success":
+        print(f"Converted {result.feature_count} features")
 
     # Read to GeoJSON, manipulate, then write
     geojson = read_shapefile("farms.shp")
@@ -19,7 +21,7 @@ Example usage:
     write_kml(geojson, "large_farms.kml")
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .readers import (
     read_geojson,
@@ -52,6 +54,10 @@ from .core import (
     collect_input_files,
     BatchResult,
     FileResult,
+    ConvertResult,
+    EXIT_SUCCESS,
+    EXIT_ERROR,
+    EXIT_PARTIAL,
 )
 
 from .crs import (
@@ -87,11 +93,16 @@ __all__ = [
     "get_supported_formats",
     "probe",
     "print_probe_report",
+    "ConvertResult",
     # Batch
     "convert_batch",
     "collect_input_files",
     "BatchResult",
     "FileResult",
+    # Exit codes
+    "EXIT_SUCCESS",
+    "EXIT_ERROR",
+    "EXIT_PARTIAL",
     # CRS
     "WGS84",
     "normalize_crs",

@@ -4,34 +4,47 @@ Writers - Convert GeoJSON to various geospatial formats.
 
 import csv
 import json
+import sys
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, TextIO
+
+# Text formats that support streaming
+TEXT_FORMATS = {'.geojson', '.json', '.kml', '.gpx', '.csv', '.wkt', '.topojson'}
+BINARY_FORMATS = {'.shp', '.kmz'}  # File-only formats
 
 
-def write_geojson(geojson: dict, path: Union[str, Path], indent: int = 2):
+def write_geojson(geojson: dict, path_or_stream: Union[str, Path, TextIO], indent: int = 2, quiet: bool = False):
     """
-    Write GeoJSON to file.
+    Write GeoJSON to file or stream.
 
     Args:
         geojson: GeoJSON FeatureCollection dict
-        path: Output file path
+        path_or_stream: Output file path, or file-like object
         indent: JSON indentation (default 2, use None for compact)
+        quiet: Suppress status messages
     """
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(geojson, f, indent=indent)
-    print(f"Wrote {len(geojson.get('features', []))} features to {Path(path).name}")
+    if hasattr(path_or_stream, 'write'):
+        # It's a file-like object (stream)
+        json.dump(geojson, path_or_stream, indent=indent)
+    else:
+        with open(path_or_stream, 'w', encoding='utf-8') as f:
+            json.dump(geojson, f, indent=indent)
+        if not quiet:
+            print(f"Wrote {len(geojson.get('features', []))} features to {Path(path_or_stream).name}", file=sys.stderr)
 
 
-def write_kml(geojson: dict, path: Union[str, Path], name_field: str = 'name'):
+def write_kml(geojson: dict, path_or_stream: Union[str, Path, TextIO], name_field: str = 'name', quiet: bool = False):
     """
-    Write GeoJSON as KML file.
+    Write GeoJSON as KML file or stream.
 
     Args:
         geojson: GeoJSON FeatureCollection dict
-        path: Output file path
+        path_or_stream: Output file path, or file-like object
         name_field: Property field to use for placemark names
+        quiet: Suppress status messages
     """
-    path = Path(path)
+    is_stream = hasattr(path_or_stream, 'write')
+    doc_name = "stream" if is_stream else Path(path_or_stream).stem
 
     def escape_xml(text) -> str:
         if not isinstance(text, str):
@@ -101,7 +114,7 @@ def write_kml(geojson: dict, path: Union[str, Path], name_field: str = 'name'):
     kml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
 <Document>
-<name>{escape_xml(path.stem)}</name>
+<name>{escape_xml(doc_name)}</name>
 <Style id="defaultStyle">
 <LineStyle><color>ff0000ff</color><width>2</width></LineStyle>
 <PolyStyle><color>4d0000ff</color><fill>1</fill><outline>1</outline></PolyStyle>
@@ -110,20 +123,25 @@ def write_kml(geojson: dict, path: Union[str, Path], name_field: str = 'name'):
 </Document>
 </kml>"""
 
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(kml)
-    print(f"Wrote {len(placemarks)} features to {path.name}")
+    if is_stream:
+        path_or_stream.write(kml)
+    else:
+        with open(path_or_stream, 'w', encoding='utf-8') as f:
+            f.write(kml)
+        if not quiet:
+            print(f"Wrote {len(placemarks)} features to {Path(path_or_stream).name}", file=sys.stderr)
 
 
-def write_csv(geojson: dict, path: Union[str, Path], include_wkt: bool = False):
+def write_csv(geojson: dict, path_or_stream: Union[str, Path, TextIO], include_wkt: bool = False, quiet: bool = False):
     """
-    Write GeoJSON as CSV file.
+    Write GeoJSON as CSV file or stream.
 
     For point data, includes lat/lon columns.
     For all geometries, optionally includes WKT.
 
     Args:
         geojson: GeoJSON FeatureCollection dict
+        quiet: Suppress status messages
         path: Output file path
         include_wkt: Include WKT geometry column
     """
@@ -143,7 +161,7 @@ def write_csv(geojson: dict, path: Union[str, Path], include_wkt: bool = False):
     if include_wkt:
         fieldnames.append('wkt')
 
-    with open(path, 'w', encoding='utf-8', newline='') as f:
+    def write_rows(f):
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
 
@@ -162,7 +180,14 @@ def write_csv(geojson: dict, path: Union[str, Path], include_wkt: bool = False):
 
             writer.writerow(row)
 
-    print(f"Wrote {len(features)} features to {Path(path).name}")
+    is_stream = hasattr(path_or_stream, 'write')
+    if is_stream:
+        write_rows(path_or_stream)
+    else:
+        with open(path_or_stream, 'w', encoding='utf-8', newline='') as f:
+            write_rows(f)
+        if not quiet:
+            print(f"Wrote {len(features)} features to {Path(path_or_stream).name}", file=sys.stderr)
 
 
 def _get_centroid(geometry: dict) -> Optional[list]:
@@ -256,17 +281,18 @@ def geometry_to_wkt(geometry: dict) -> str:
     return ""
 
 
-def write_wkt(geojson: dict, path: Union[str, Path]):
+def write_wkt(geojson: dict, path_or_stream: Union[str, Path, TextIO], quiet: bool = False):
     """
-    Write GeoJSON as WKT file (one geometry per line).
+    Write GeoJSON as WKT file or stream (one geometry per line).
 
     Args:
         geojson: GeoJSON FeatureCollection dict
-        path: Output file path
+        path_or_stream: Output file path, or file-like object
+        quiet: Suppress status messages
     """
     features = geojson.get("features", [])
 
-    with open(path, 'w', encoding='utf-8') as f:
+    def write_lines(f):
         for feature in features:
             props = feature.get("properties", {})
             geometry = feature.get("geometry", {})
@@ -278,7 +304,14 @@ def write_wkt(geojson: dict, path: Union[str, Path]):
                 f.write(f"# {name}\n")
             f.write(f"{wkt}\n")
 
-    print(f"Wrote {len(features)} geometries to {Path(path).name}")
+    is_stream = hasattr(path_or_stream, 'write')
+    if is_stream:
+        write_lines(path_or_stream)
+    else:
+        with open(path_or_stream, 'w', encoding='utf-8') as f:
+            write_lines(f)
+        if not quiet:
+            print(f"Wrote {len(features)} geometries to {Path(path_or_stream).name}", file=sys.stderr)
 
 
 def write_shapefile(geojson: dict, path: Union[str, Path]):
@@ -381,19 +414,20 @@ def write_shapefile(geojson: dict, path: Union[str, Path]):
     print(f"Wrote {len(features)} features to {Path(path).name}")
 
 
-def write_svg(geojson: dict, path: Union[str, Path], width: int = 800, height: int = 600,
-              stroke: str = "#ff0000", fill: str = "#ff000033", stroke_width: float = 1.0):
+def write_svg(geojson: dict, path_or_stream: Union[str, Path, TextIO], width: int = 800, height: int = 600,
+              stroke: str = "#ff0000", fill: str = "#ff000033", stroke_width: float = 1.0, quiet: bool = False):
     """
-    Write GeoJSON as SVG file.
+    Write GeoJSON as SVG file or stream.
 
     Args:
         geojson: GeoJSON FeatureCollection dict
-        path: Output file path
+        path_or_stream: Output file path, or file-like object
         width: SVG width in pixels
         height: SVG height in pixels
         stroke: Stroke color (CSS color)
         fill: Fill color (CSS color)
         stroke_width: Stroke width
+        quiet: Suppress status messages
     """
     features = geojson.get("features", [])
     if not features:
@@ -503,23 +537,30 @@ def write_svg(geojson: dict, path: Union[str, Path], width: int = 800, height: i
 {chr(10).join(elements)}
 </svg>"""
 
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(svg)
-    print(f"Wrote {len(features)} features to {Path(path).name}")
+    is_stream = hasattr(path_or_stream, 'write')
+    if is_stream:
+        path_or_stream.write(svg)
+    else:
+        with open(path_or_stream, 'w', encoding='utf-8') as f:
+            f.write(svg)
+        if not quiet:
+            print(f"Wrote {len(features)} features to {Path(path_or_stream).name}", file=sys.stderr)
 
 
-def write_topojson(geojson: dict, path: Union[str, Path], quantization: int = 10000):
+def write_topojson(geojson: dict, path_or_stream: Union[str, Path, TextIO], quantization: int = 10000, quiet: bool = False):
     """
-    Write GeoJSON as TopoJSON file.
+    Write GeoJSON as TopoJSON file or stream.
 
     Note: This is a basic implementation without shared arc detection.
 
     Args:
         geojson: GeoJSON FeatureCollection dict
-        path: Output file path
+        path_or_stream: Output file path, or file-like object
         quantization: Quantization factor for coordinate precision
+        quiet: Suppress status messages
     """
-    path = Path(path)
+    is_stream = hasattr(path_or_stream, 'write')
+    obj_name = "data" if is_stream else Path(path_or_stream).stem
     features = geojson.get("features", [])
     if not features:
         print("No features to write")
@@ -603,21 +644,25 @@ def write_topojson(geojson: dict, path: Union[str, Path], quantization: int = 10
         topo_geom["properties"] = props
         geometries.append(topo_geom)
 
-    topojson = {
+    topojson_data = {
         "type": "Topology",
         "transform": transform,
         "arcs": arcs,
         "objects": {
-            path.stem: {
+            obj_name: {
                 "type": "GeometryCollection",
                 "geometries": geometries
             }
         }
     }
 
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(topojson, f)
-    print(f"Wrote {len(features)} features to {path.name}")
+    if is_stream:
+        json.dump(topojson_data, path_or_stream)
+    else:
+        with open(path_or_stream, 'w', encoding='utf-8') as f:
+            json.dump(topojson_data, f)
+        if not quiet:
+            print(f"Wrote {len(features)} features to {Path(path_or_stream).name}", file=sys.stderr)
 
 
 # Registry of writers by file extension

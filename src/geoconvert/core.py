@@ -4,9 +4,10 @@ Core conversion functions with CRS handling.
 
 import fnmatch
 import json
+import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Callable
 
 from .readers import READERS
 from .writers import WRITERS
@@ -19,6 +20,35 @@ from .crs import (
     requires_wgs84,
     detect_crs_from_geojson,
 )
+
+# ============================================================================
+# EXIT CODES
+# ============================================================================
+
+EXIT_SUCCESS = 0
+EXIT_ERROR = 1
+EXIT_PARTIAL = 2  # Batch with some failures
+
+
+# ============================================================================
+# RESULT TYPES
+# ============================================================================
+
+@dataclass
+class ConvertResult:
+    """Result of a single file conversion."""
+    status: str  # "success", "error"
+    input_path: Optional[str] = None
+    output_path: Optional[str] = None
+    src_crs: Optional[str] = None
+    dst_crs: Optional[str] = None
+    feature_count: Optional[int] = None
+    warnings: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        """Convert to dict, excluding None values."""
+        return {k: v for k, v in asdict(self).items() if v is not None and v != []}
 
 
 def get_supported_formats() -> dict:
@@ -48,7 +78,11 @@ def convert(
     include_wkt: bool = False,
     width: int = 800,
     height: int = 600,
-) -> bool:
+    log_func: Optional[Callable[[str], None]] = None,
+    quiet: bool = False,
+    input_format: Optional[str] = None,
+    output_format: Optional[str] = None,
+) -> ConvertResult:
     """
     Convert between geospatial formats with optional reprojection.
 
@@ -65,49 +99,114 @@ def convert(
         include_wkt: Include WKT geometry in CSV output
         width: SVG width in pixels
         height: SVG height in pixels
+        log_func: Optional function for logging messages (defaults to print to stderr)
+        quiet: Suppress log messages
+        input_format: Input format override (required when input is stdin '-')
+        output_format: Output format override (required when output is stdout '-')
 
     Returns:
-        True if conversion succeeded, False otherwise
+        ConvertResult with status and details
 
     Example:
-        >>> convert("input.shp", "output.geojson")
-        >>> convert("utm_data.shp", "map.kml", src_crs="EPSG:26915")
+        >>> result = convert("input.shp", "output.geojson")
+        >>> if result.status == "success":
+        ...     print(f"Converted {result.feature_count} features")
     """
-    input_path = Path(input_path)
-    output_path = Path(output_path)
+    warnings = []
 
-    input_ext = input_path.suffix.lower()
-    output_ext = output_path.suffix.lower()
+    # Check for stdin/stdout streaming
+    is_stdin = (str(input_path) == "-")
+    is_stdout = (str(output_path) == "-")
+
+    def log(msg: str):
+        if quiet:
+            return
+        if log_func:
+            log_func(msg)
+        else:
+            print(msg, file=sys.stderr)
+
+    # Handle stdin/stdout with format overrides
+    if is_stdin:
+        if not input_format:
+            return ConvertResult(
+                status="error",
+                input_path="-",
+                error="--from EXT is required when reading from stdin"
+            )
+        input_ext = input_format if input_format.startswith('.') else f'.{input_format}'
+        input_ext = input_ext.lower()
+    else:
+        input_path = Path(input_path)
+        input_ext = input_path.suffix.lower()
+
+    if is_stdout:
+        if not output_format:
+            return ConvertResult(
+                status="error",
+                input_path=str(input_path) if not is_stdin else "-",
+                error="--to EXT is required when writing to stdout"
+            )
+        output_ext = output_format if output_format.startswith('.') else f'.{output_format}'
+        output_ext = output_ext.lower()
+    else:
+        output_path = Path(output_path)
+        output_ext = output_path.suffix.lower()
 
     # Get reader
     reader = READERS.get(input_ext)
     if not reader:
-        print(f"Error: Unsupported input format: {input_ext}")
-        print(f"Supported: {', '.join(READERS.keys())}")
-        return False
+        return ConvertResult(
+            status="error",
+            input_path=str(input_path),
+            error=f"Unsupported input format: {input_ext}. Supported: {', '.join(READERS.keys())}"
+        )
 
     # Get writer
     writer = WRITERS.get(output_ext)
     if not writer:
-        print(f"Error: Unsupported output format: {output_ext}")
-        print(f"Supported: {', '.join(WRITERS.keys())}")
-        return False
+        return ConvertResult(
+            status="error",
+            input_path=str(input_path),
+            error=f"Unsupported output format: {output_ext}. Supported: {', '.join(WRITERS.keys())}"
+        )
 
-    print(f"Converting {input_path.name} -> {output_path.name}")
+    # Format names for logging
+    input_name = "-" if is_stdin else input_path.name
+    output_name = "-" if is_stdout else output_path.name
+    log(f"Converting {input_name} -> {output_name}")
 
-    # Read input (special handling for CSV)
-    if input_ext == '.csv':
-        from .readers import read_csv
-        geojson = read_csv(input_path, lat_col=lat, lon_col=lon)
-        # CSV with lat/lon is assumed WGS84
-        if not src_crs:
-            src_crs = WGS84
-    else:
-        geojson = reader(input_path)
+    # Read input (special handling for CSV and stdin)
+    try:
+        if is_stdin:
+            # Read from stdin
+            input_stream = sys.stdin
+            if input_ext == '.csv':
+                from .readers import read_csv
+                geojson = read_csv(input_stream, lat_col=lat, lon_col=lon)
+                if not src_crs:
+                    src_crs = WGS84
+            else:
+                geojson = reader(input_stream)
+        elif input_ext == '.csv':
+            from .readers import read_csv
+            geojson = read_csv(input_path, lat_col=lat, lon_col=lon)
+            # CSV with lat/lon is assumed WGS84
+            if not src_crs:
+                src_crs = WGS84
+        else:
+            geojson = reader(input_path)
+    except Exception as e:
+        return ConvertResult(
+            status="error",
+            input_path=input_name,
+            error=f"Failed to read input: {e}"
+        )
 
     # Determine source CRS
     detected_crs = None
-    if not src_crs:
+    final_src_crs = src_crs
+    if not final_src_crs:
         # Check if reader detected CRS (e.g., from .prj)
         detected_crs = geojson.pop("_crs", None)
 
@@ -116,50 +215,78 @@ def convert(
             detected_crs = detect_crs_from_geojson(geojson)
 
         if detected_crs:
-            src_crs = detected_crs
-            print(f"  Detected CRS: {get_crs_name(normalize_crs(src_crs))}")
+            final_src_crs = detected_crs
+            log(f"  Detected CRS: {get_crs_name(normalize_crs(final_src_crs))}")
         elif assume_wgs84:
-            src_crs = WGS84
-            print("  Assuming WGS84 (--assume-wgs84)")
+            final_src_crs = WGS84
+            log("  Assuming WGS84 (--assume-wgs84)")
         elif requires_wgs84(output_ext):
-            print(f"Error: Output format {output_ext} requires WGS84, but no CRS detected.")
-            print("  Options:")
-            print("    --src-crs EPSG:XXXX  (specify the source CRS)")
-            print("    --assume-wgs84       (if you know it's already WGS84)")
-            return False
+            return ConvertResult(
+                status="error",
+                input_path=input_name,
+                error=f"Output format {output_ext} requires WGS84, but no CRS detected. Use --src-crs or --assume-wgs84."
+            )
 
     # Determine destination CRS
-    if not dst_crs:
+    final_dst_crs = dst_crs
+    if not final_dst_crs:
         if requires_wgs84(output_ext):
-            dst_crs = WGS84
-        elif src_crs:
+            final_dst_crs = WGS84
+        elif final_src_crs:
             # Preserve source CRS for other formats
-            dst_crs = src_crs
+            final_dst_crs = final_src_crs
         else:
-            dst_crs = WGS84  # Default fallback
+            final_dst_crs = WGS84  # Default fallback
 
     # Perform reprojection if needed
-    if src_crs and dst_crs and not no_reproject:
-        src_crs_obj = normalize_crs(src_crs)
-        dst_crs_obj = normalize_crs(dst_crs)
+    if final_src_crs and final_dst_crs and not no_reproject:
+        src_crs_obj = normalize_crs(final_src_crs)
+        dst_crs_obj = normalize_crs(final_dst_crs)
 
         if src_crs_obj and dst_crs_obj:
             transformer = create_transformer(src_crs_obj, dst_crs_obj)
             if transformer:
-                print(f"  Reprojecting: {get_crs_name(src_crs_obj)} -> {get_crs_name(dst_crs_obj)}")
+                log(f"  Reprojecting: {get_crs_name(src_crs_obj)} -> {get_crs_name(dst_crs_obj)}")
                 geojson = transform_geojson(geojson, transformer)
 
     # Write output with format-specific options
-    if output_ext == '.kml':
-        writer(geojson, output_path, name_field=name_field)
-    elif output_ext == '.csv':
-        writer(geojson, output_path, include_wkt=include_wkt)
-    elif output_ext == '.svg':
-        writer(geojson, output_path, width=width, height=height)
-    else:
-        writer(geojson, output_path)
+    try:
+        # Determine output target (stdout or file)
+        output_target = sys.stdout if is_stdout else output_path
 
-    return True
+        if output_ext == '.kml':
+            writer(geojson, output_target, name_field=name_field, quiet=True)
+        elif output_ext == '.csv':
+            writer(geojson, output_target, include_wkt=include_wkt, quiet=True)
+        elif output_ext == '.svg':
+            writer(geojson, output_target, width=width, height=height, quiet=True)
+        elif output_ext == '.topojson':
+            writer(geojson, output_target, quiet=True)
+        elif output_ext == '.wkt':
+            writer(geojson, output_target, quiet=True)
+        elif output_ext in ('.geojson', '.json'):
+            writer(geojson, output_target, quiet=True)
+        else:
+            writer(geojson, output_target)
+    except Exception as e:
+        return ConvertResult(
+            status="error",
+            input_path=input_name,
+            output_path=output_name,
+            error=f"Failed to write output: {e}"
+        )
+
+    feature_count = len(geojson.get("features", []))
+
+    return ConvertResult(
+        status="success",
+        input_path=input_name,
+        output_path=output_name,
+        src_crs=get_crs_name(normalize_crs(final_src_crs)) if final_src_crs else None,
+        dst_crs=get_crs_name(normalize_crs(final_dst_crs)) if final_dst_crs else None,
+        feature_count=feature_count,
+        warnings=warnings,
+    )
 
 
 # ============================================================================
@@ -216,18 +343,18 @@ class BatchResult:
             json.dump(self.to_dict(), f, indent=2)
 
     def print_summary(self):
-        """Print summary to stdout."""
-        print("\nBatch conversion complete:")
-        print(f"  Total:     {self.total}")
-        print(f"  Succeeded: {self.succeeded}")
-        print(f"  Failed:    {self.failed}")
-        print(f"  Skipped:   {self.skipped}")
+        """Print summary to stderr."""
+        print("\nBatch conversion complete:", file=sys.stderr)
+        print(f"  Total:     {self.total}", file=sys.stderr)
+        print(f"  Succeeded: {self.succeeded}", file=sys.stderr)
+        print(f"  Failed:    {self.failed}", file=sys.stderr)
+        print(f"  Skipped:   {self.skipped}", file=sys.stderr)
 
         if self.failed > 0:
-            print("\nFailed files:")
+            print("\nFailed files:", file=sys.stderr)
             for f in self.files:
                 if f.status == "failed":
-                    print(f"  {f.input_path}: {f.error}")
+                    print(f"  {f.input_path}: {f.error}", file=sys.stderr)
 
 
 def collect_input_files(
@@ -384,73 +511,65 @@ def convert_batch(
         try:
             # Check if we need to warn about CRS override
             effective_src_crs = src_crs
-            warnings = []
+            batch_warnings = []
 
             if src_crs and not force_src_crs:
                 # Probe to see if file has detected CRS
                 probe_result = probe(input_path)
                 detected = probe_result.get("crs")
                 if detected and detected != "Unknown" and detected != src_crs:
-                    warnings.append(f"Detected CRS {detected} overridden by --src-crs {src_crs}")
+                    batch_warnings.append(f"Detected CRS {detected} overridden by --src-crs {src_crs}")
 
-            # Suppress print output for batch mode
-            import io
-            import sys
-            old_stdout = sys.stdout
-            sys.stdout = io.StringIO()
+            # Use quiet mode in convert() for batch processing
+            convert_result = convert(
+                input_path,
+                output_path,
+                src_crs=effective_src_crs,
+                dst_crs=dst_crs,
+                assume_wgs84=assume_wgs84,
+                no_reproject=no_reproject,
+                lat=lat,
+                lon=lon,
+                name_field=name_field,
+                include_wkt=include_wkt,
+                width=width,
+                height=height,
+                quiet=True,
+            )
 
-            try:
-                success = convert(
-                    input_path,
-                    output_path,
-                    src_crs=effective_src_crs,
-                    dst_crs=dst_crs,
-                    assume_wgs84=assume_wgs84,
-                    no_reproject=no_reproject,
-                    lat=lat,
-                    lon=lon,
-                    name_field=name_field,
-                    include_wkt=include_wkt,
-                    width=width,
-                    height=height,
-                )
-                output = sys.stdout.getvalue()
-            finally:
-                sys.stdout = old_stdout
-
-            if success:
-                # Get feature count from output if possible
-                feature_count = None
+            if convert_result.status == "success":
+                # Get geometry types from output if possible
                 geometry_types = None
                 try:
                     probe_out = probe(output_path)
-                    feature_count = probe_out.get("feature_count")
                     geometry_types = probe_out.get("geometry_types")
                 except Exception:
                     pass
+
+                # Merge warnings
+                all_warnings = batch_warnings + (convert_result.warnings or [])
 
                 file_result = FileResult(
                     input_path=str(input_path),
                     output_path=str(output_path),
                     status="ok",
-                    warnings=warnings,
-                    feature_count=feature_count,
+                    warnings=all_warnings if all_warnings else [],
+                    feature_count=convert_result.feature_count,
                     geometry_types=geometry_types,
+                    detected_crs=convert_result.src_crs,
                 )
                 if not quiet:
-                    print(f"OK   {input_path.name} -> {output_path.name}")
+                    print(f"OK   {input_path.name} -> {output_path.name}", file=sys.stderr)
             else:
-                # Extract error from captured output
-                error_msg = output.strip() if output else "Conversion failed"
                 file_result = FileResult(
                     input_path=str(input_path),
                     output_path=str(output_path),
                     status="failed",
-                    error=error_msg,
-                    warnings=warnings,
+                    error=convert_result.error or "Conversion failed",
+                    warnings=batch_warnings if batch_warnings else [],
                 )
                 if not quiet:
-                    print(f"FAIL {input_path.name}: {error_msg}")
+                    print(f"FAIL {input_path.name}: {convert_result.error}", file=sys.stderr)
 
             result.add(file_result)
 
@@ -612,29 +731,31 @@ def _probe_kml_extras(path: Path, result: dict):
         pass
 
 
-def print_probe_report(result: dict):
+def print_probe_report(result: dict, file=None):
     """Print a formatted probe report."""
-    print(f"\nFile: {result['path']}")
-    print(f"Format: {result['format']}")
-    print(f"CRS: {result['crs']}")
+    if file is None:
+        file = sys.stderr
+    print(f"\nFile: {result['path']}", file=file)
+    print(f"Format: {result['format']}", file=file)
+    print(f"CRS: {result['crs']}", file=file)
     if result['crs_is_geographic'] is not None:
-        print(f"  Geographic (lat/lon): {'Yes' if result['crs_is_geographic'] else 'No (projected)'}")
-    print(f"Features: {result['feature_count']}")
+        print(f"  Geographic (lat/lon): {'Yes' if result['crs_is_geographic'] else 'No (projected)'}", file=file)
+    print(f"Features: {result['feature_count']}", file=file)
 
     if result['geometry_types']:
-        print(f"Geometry types: {', '.join(result['geometry_types'])}")
+        print(f"Geometry types: {', '.join(result['geometry_types'])}", file=file)
 
     if result['has_z']:
-        print("Has Z coordinates: Yes")
+        print("Has Z coordinates: Yes", file=file)
 
     if result['properties']:
-        print(f"Properties: {', '.join(result['properties'][:10])}", end="")
+        print(f"Properties: {', '.join(result['properties'][:10])}", end="", file=file)
         if len(result['properties']) > 10:
-            print(f" ... and {len(result['properties']) - 10} more")
+            print(f" ... and {len(result['properties']) - 10} more", file=file)
         else:
-            print()
+            print(file=file)
 
     if result['warnings']:
-        print("\nWarnings:")
+        print("\nWarnings:", file=file)
         for w in result['warnings']:
-            print(f"  - {w}")
+            print(f"  - {w}", file=file)
